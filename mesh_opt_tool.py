@@ -28,6 +28,14 @@ class ModelMeta:
     source_size: int
 
 
+def list_obj_files(directory: Path):
+    return sorted(
+        (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".obj"),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+
+
 class ModelRow:
     def __init__(self, parent, app, meta: ModelMeta):
         self.app = app
@@ -290,11 +298,7 @@ class MeshOptApp:
             return
 
         name_map = self._load_name_map(source_dir)
-        obj_paths = sorted(
-            (path for path in source_dir.glob("*.obj") if len(path.stem) == 36 and path.stem.count("-") == 4),
-            key=lambda p: p.stat().st_size,
-            reverse=True,
-        )
+        obj_paths = list_obj_files(source_dir)
         self.loading_total = len(obj_paths)
         loaded_rows = []
         for index, path in enumerate(obj_paths):
@@ -479,11 +483,7 @@ class MeshOptApp:
 
     def _run_batch_drc_job(self, obj_dir: Path, drc_output_dir: Path):
         try:
-            obj_files = sorted(
-                (path for path in obj_dir.glob("*.obj") if len(path.stem) == 36 and path.stem.count("-") == 4),
-                key=lambda p: p.stat().st_size,
-                reverse=True,
-            )
+            obj_files = list_obj_files(obj_dir)
             if not obj_files:
                 raise ValueError("输出目录里没有可转换的 OBJ 文件")
 
