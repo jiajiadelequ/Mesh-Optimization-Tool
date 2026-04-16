@@ -38,101 +38,52 @@ def list_obj_files(directory: Path):
 
 
 class ModelRow:
-    def __init__(self, parent, app, meta: ModelMeta):
-        self.app = app
+    def __init__(self, meta: ModelMeta):
         self.meta = meta
-        self.var_selected = tk.BooleanVar(value=True)
-        self.var_ratio = tk.StringVar(value="0.10")
-        self.var_quality = tk.StringVar(value="0.5")
-        self.var_preserve_boundary = tk.BooleanVar(value=True)
-        self.var_preserve_normal = tk.BooleanVar(value=True)
-        self.var_preserve_topology = tk.BooleanVar(value=True)
-        self.var_result = tk.StringVar(value="结果: 未处理")
-
-        self.frame = ttk.Frame(parent, padding=(8, 6))
-        self.frame.columnconfigure(1, weight=1)
-        self.frame.columnconfigure(2, weight=0)
-
-        left = ttk.Frame(self.frame)
-        left.grid(row=0, column=0, sticky="nw", padx=(0, 10))
-        ttk.Checkbutton(left, variable=self.var_selected).grid(row=0, column=0, sticky="w")
-
-        body = ttk.Frame(self.frame)
-        body.grid(row=0, column=1, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-
-        title = f"{meta.display_name} [{meta.path.name}]"
-        ttk.Label(body, text=title).grid(row=0, column=0, sticky="w")
-
-        subtitle = f"分组: {meta.group_name or '-'} | size: {meta.source_size / 1024 / 1024:.2f} MB"
-        ttk.Label(body, text=subtitle).grid(row=1, column=0, sticky="w")
-
-        options = ttk.Frame(body)
-        options.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-
-        ttk.Label(options, text="比例").grid(row=0, column=0, sticky="w")
-        ttk.Entry(options, textvariable=self.var_ratio, width=7).grid(row=0, column=1, sticky="w", padx=(0, 12))
-
-        ttk.Label(options, text="Quality").grid(row=0, column=2, sticky="w")
-        ttk.Entry(options, textvariable=self.var_quality, width=6).grid(row=0, column=3, sticky="w", padx=(0, 12))
-
-        ttk.Checkbutton(options, text="Boundary", variable=self.var_preserve_boundary).grid(row=0, column=4, sticky="w")
-        ttk.Checkbutton(options, text="Normal", variable=self.var_preserve_normal).grid(row=0, column=5, sticky="w")
-        ttk.Checkbutton(options, text="Topology", variable=self.var_preserve_topology).grid(row=0, column=6, sticky="w")
-
-        self.lbl_result = ttk.Label(body, textvariable=self.var_result)
-        self.lbl_result.grid(row=3, column=0, sticky="w", pady=(6, 0))
-
-        actions = ttk.Frame(self.frame)
-        actions.grid(row=0, column=2, sticky="ne", padx=(10, 0))
-        ttk.Button(actions, text="减面", command=self.simplify_one).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(actions, text="预览", command=self.preview_one).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(actions, text="重置到 1/10", command=self.reset_defaults).grid(row=0, column=2)
-    def grid(self, **kwargs):
-        self.frame.grid(**kwargs)
+        self.selected = True
+        self.ratio = "0.10"
+        self.quality = "0.5"
+        self.preserve_boundary = True
+        self.preserve_normal = True
+        self.preserve_topology = True
+        self.result_text = "未处理"
 
     def reset_defaults(self):
-        self.var_ratio.set("0.10")
-        self.var_quality.set("0.5")
-        self.var_preserve_boundary.set(True)
-        self.var_preserve_normal.set(True)
-        self.var_preserve_topology.set(True)
-        self.var_result.set("结果: 未处理")
+        self.ratio = "0.10"
+        self.quality = "0.5"
+        self.preserve_boundary = True
+        self.preserve_normal = True
+        self.preserve_topology = True
+        self.result_text = "未处理"
 
     def current_params(self):
-        ratio = float(self.var_ratio.get().strip())
-        quality = float(self.var_quality.get().strip())
+        ratio = float(self.ratio.strip())
+        quality = float(self.quality.strip())
         return {
             "ratio": ratio,
             "qualitythr": quality,
-            "preserveboundary": self.var_preserve_boundary.get(),
-            "preservenormal": self.var_preserve_normal.get(),
-            "preservetopology": self.var_preserve_topology.get(),
+            "preserveboundary": self.preserve_boundary,
+            "preservenormal": self.preserve_normal,
+            "preservetopology": self.preserve_topology,
         }
 
     def export_state(self):
         return {
-            "selected": self.var_selected.get(),
-            "ratio": self.var_ratio.get().strip(),
-            "quality": self.var_quality.get().strip(),
-            "preserve_boundary": self.var_preserve_boundary.get(),
-            "preserve_normal": self.var_preserve_normal.get(),
-            "preserve_topology": self.var_preserve_topology.get(),
+            "selected": self.selected,
+            "ratio": self.ratio.strip(),
+            "quality": self.quality.strip(),
+            "preserve_boundary": self.preserve_boundary,
+            "preserve_normal": self.preserve_normal,
+            "preserve_topology": self.preserve_topology,
         }
 
     def apply_state(self, payload: dict):
-        self.var_selected.set(payload.get("selected", True))
-        self.var_ratio.set(str(payload.get("ratio", "0.10")))
-        self.var_quality.set(str(payload.get("quality", "0.5")))
-        self.var_preserve_boundary.set(bool(payload.get("preserve_boundary", True)))
-        self.var_preserve_normal.set(bool(payload.get("preserve_normal", True)))
-        self.var_preserve_topology.set(bool(payload.get("preserve_topology", True)))
-
-    def simplify_one(self):
-        self.app.start_single_job(self, preview=False)
-
-    def preview_one(self):
-        self.app.start_single_job(self, preview=True)
+        self.selected = bool(payload.get("selected", True))
+        self.ratio = str(payload.get("ratio", "0.10"))
+        self.quality = str(payload.get("quality", "0.5"))
+        self.preserve_boundary = bool(payload.get("preserve_boundary", True))
+        self.preserve_normal = bool(payload.get("preserve_normal", True))
+        self.preserve_topology = bool(payload.get("preserve_topology", True))
 
 
 class MeshOptApp:
@@ -156,8 +107,19 @@ class MeshOptApp:
         self.var_select_all = tk.BooleanVar(value=True)
         self.var_generate_data_json = tk.BooleanVar(value=True)
         self.var_status = tk.StringVar(value="就绪")
+        self.var_editor_selected = tk.BooleanVar(value=True)
+        self.var_editor_ratio = tk.StringVar(value="0.10")
+        self.var_editor_quality = tk.StringVar(value="0.5")
+        self.var_editor_preserve_boundary = tk.BooleanVar(value=True)
+        self.var_editor_preserve_normal = tk.BooleanVar(value=True)
+        self.var_editor_preserve_topology = tk.BooleanVar(value=True)
+        self.var_editor_name = tk.StringVar(value="未选择模型")
+        self.var_editor_group = tk.StringVar(value="-")
+        self.var_editor_size = tk.StringVar(value="-")
+        self.var_editor_result = tk.StringVar(value="结果: 未处理")
         self.recent_profile_paths = []
         self.pending_profile_payload = None
+        self.active_row = None
 
         self._load_settings()
         self._build_menu()
@@ -211,20 +173,73 @@ class MeshOptApp:
         ttk.Button(controls, text="保存参数JSON", command=self.save_profile_as).grid(row=0, column=5, padx=(8, 0))
         ttk.Button(controls, text="加载参数JSON", command=self.load_profile_from_dialog).grid(row=0, column=6, padx=(8, 0))
 
-        center = ttk.Frame(self.root, padding=(10, 0, 10, 0))
-        center.grid(row=1, column=0, sticky="nsew")
-        center.columnconfigure(0, weight=1)
-        center.rowconfigure(0, weight=1)
+        center = ttk.Panedwindow(self.root, orient="horizontal")
+        center.grid(row=1, column=0, sticky="nsew", padx=10)
 
-        self.canvas = tk.Canvas(center, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(center, orient="vertical", command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.scrollbar.grid(row=0, column=1, sticky="ns")
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        left_panel = ttk.Frame(center, padding=(0, 0, 10, 0))
+        left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(1, weight=1)
+        center.add(left_panel, weight=3)
+
+        list_actions = ttk.Frame(left_panel)
+        list_actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(list_actions, text="全选", command=self.select_all_rows).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(list_actions, text="全不选", command=self.clear_all_rows).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(list_actions, text="反选", command=self.invert_row_selection).grid(row=0, column=2, padx=(0, 6))
+
+        columns = ("selected", "name", "group", "size", "result")
+        self.model_tree = ttk.Treeview(left_panel, columns=columns, show="headings", selectmode="browse")
+        self.model_tree.heading("selected", text="处理")
+        self.model_tree.heading("name", text="模型")
+        self.model_tree.heading("group", text="分组")
+        self.model_tree.heading("size", text="大小(MB)")
+        self.model_tree.heading("result", text="结果")
+        self.model_tree.column("selected", width=56, anchor="center", stretch=False)
+        self.model_tree.column("name", width=240, anchor="w")
+        self.model_tree.column("group", width=120, anchor="w")
+        self.model_tree.column("size", width=90, anchor="e", stretch=False)
+        self.model_tree.column("result", width=220, anchor="w")
+        self.model_tree.grid(row=1, column=0, sticky="nsew")
+        self.model_tree.bind("<<TreeviewSelect>>", self._on_model_tree_select)
+
+        list_scroll = ttk.Scrollbar(left_panel, orient="vertical", command=self.model_tree.yview)
+        self.model_tree.configure(yscrollcommand=list_scroll.set)
+        list_scroll.grid(row=1, column=1, sticky="ns")
+
+        right_panel = ttk.LabelFrame(center, text="当前模型参数", padding=10)
+        right_panel.columnconfigure(1, weight=1)
+        center.add(right_panel, weight=2)
+
+        ttk.Label(right_panel, text="模型").grid(row=0, column=0, sticky="w")
+        ttk.Label(right_panel, textvariable=self.var_editor_name).grid(row=0, column=1, sticky="w")
+        ttk.Label(right_panel, text="分组").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(right_panel, textvariable=self.var_editor_group).grid(row=1, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(right_panel, text="大小").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(right_panel, textvariable=self.var_editor_size).grid(row=2, column=1, sticky="w", pady=(6, 0))
+
+        param_box = ttk.LabelFrame(right_panel, text="减面参数", padding=10)
+        param_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Checkbutton(param_box, text="纳入批量处理", variable=self.var_editor_selected, command=self._on_editor_selection_change).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(param_box, text="比例").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(param_box, textvariable=self.var_editor_ratio, width=10).grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(param_box, text="Quality").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(param_box, textvariable=self.var_editor_quality, width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(param_box, text="Boundary", variable=self.var_editor_preserve_boundary).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(param_box, text="Normal", variable=self.var_editor_preserve_normal).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(param_box, text="Topology", variable=self.var_editor_preserve_topology).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        editor_actions = ttk.Frame(right_panel)
+        editor_actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(editor_actions, text="应用到当前模型", command=self.apply_editor_to_active_row).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(editor_actions, text="应用到已勾选", command=self.apply_editor_to_selected_rows).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(editor_actions, text="重置当前参数", command=self.reset_active_row_defaults).grid(row=0, column=2)
+
+        preview_actions = ttk.Frame(right_panel)
+        preview_actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(preview_actions, text="减面当前模型", command=self.start_active_row_job).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(preview_actions, text="预览当前模型", command=self.preview_active_row_job).grid(row=0, column=1)
+
+        ttk.Label(right_panel, textvariable=self.var_editor_result, wraplength=320, justify="left").grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         bottom = ttk.Frame(self.root, padding=10)
         bottom.grid(row=2, column=0, sticky="ew")
@@ -294,7 +309,165 @@ class MeshOptApp:
             self.var_meshlab_path.set(path)
             self.save_settings()
 
+    def _row_tree_values(self, row: ModelRow):
+        return (
+            "是" if row.selected else "否",
+            row.meta.display_name,
+            row.meta.group_name or "-",
+            f"{row.meta.source_size / 1024 / 1024:.2f}",
+            row.result_text,
+        )
+
+    def _refresh_model_tree(self):
+        if not hasattr(self, "model_tree"):
+            return
+        existing = set(self.model_tree.get_children())
+        active_id = self.active_row.meta.path.name if self.active_row else None
+        for row in self.rows:
+            item_id = row.meta.path.name
+            values = self._row_tree_values(row)
+            if item_id in existing:
+                self.model_tree.item(item_id, values=values)
+            else:
+                self.model_tree.insert("", "end", iid=item_id, values=values)
+        for item_id in existing - {row.meta.path.name for row in self.rows}:
+            self.model_tree.delete(item_id)
+        if active_id and active_id in self.model_tree.get_children():
+            self.model_tree.selection_set(active_id)
+
+    def _load_editor_from_row(self, row: ModelRow | None):
+        if row is None:
+            self.var_editor_name.set("未选择模型")
+            self.var_editor_group.set("-")
+            self.var_editor_size.set("-")
+            self.var_editor_selected.set(True)
+            self.var_editor_ratio.set("0.10")
+            self.var_editor_quality.set("0.5")
+            self.var_editor_preserve_boundary.set(True)
+            self.var_editor_preserve_normal.set(True)
+            self.var_editor_preserve_topology.set(True)
+            self.var_editor_result.set("结果: 未处理")
+            return
+        self.var_editor_name.set(f"{row.meta.display_name} [{row.meta.path.name}]")
+        self.var_editor_group.set(row.meta.group_name or "-")
+        self.var_editor_size.set(f"{row.meta.source_size / 1024 / 1024:.2f} MB")
+        self.var_editor_selected.set(row.selected)
+        self.var_editor_ratio.set(row.ratio)
+        self.var_editor_quality.set(row.quality)
+        self.var_editor_preserve_boundary.set(row.preserve_boundary)
+        self.var_editor_preserve_normal.set(row.preserve_normal)
+        self.var_editor_preserve_topology.set(row.preserve_topology)
+        self.var_editor_result.set(f"结果: {row.result_text}")
+
+    def _save_editor_to_active_row(self):
+        if self.active_row is None:
+            return
+        self.active_row.selected = self.var_editor_selected.get()
+        self.active_row.ratio = self.var_editor_ratio.get().strip()
+        self.active_row.quality = self.var_editor_quality.get().strip()
+        self.active_row.preserve_boundary = self.var_editor_preserve_boundary.get()
+        self.active_row.preserve_normal = self.var_editor_preserve_normal.get()
+        self.active_row.preserve_topology = self.var_editor_preserve_topology.get()
+        self._refresh_model_tree()
+        self._sync_select_all_state()
+
+    def _set_active_row(self, row: ModelRow | None):
+        self._save_editor_to_active_row()
+        self.active_row = row
+        self._load_editor_from_row(row)
+        if row is not None and hasattr(self, "model_tree"):
+            self.model_tree.selection_set(row.meta.path.name)
+
+    def _on_model_tree_select(self, _event=None):
+        selection = self.model_tree.selection()
+        if not selection:
+            return
+        selected_id = selection[0]
+        row = next((item for item in self.rows if item.meta.path.name == selected_id), None)
+        if row is not None and row is not self.active_row:
+            self._set_active_row(row)
+
+    def _on_editor_selection_change(self):
+        if self.active_row is None:
+            return
+        self.active_row.selected = self.var_editor_selected.get()
+        self._refresh_model_tree()
+        self._sync_select_all_state()
+
+    def select_all_rows(self):
+        for row in self.rows:
+            row.selected = True
+        self.var_select_all.set(True)
+        self._refresh_model_tree()
+        self._load_editor_from_row(self.active_row)
+
+    def clear_all_rows(self):
+        for row in self.rows:
+            row.selected = False
+        self.var_select_all.set(False)
+        self._refresh_model_tree()
+        self._load_editor_from_row(self.active_row)
+
+    def invert_row_selection(self):
+        for row in self.rows:
+            row.selected = not row.selected
+        self._sync_select_all_state()
+        self._refresh_model_tree()
+        self._load_editor_from_row(self.active_row)
+
+    def apply_editor_to_active_row(self):
+        self._save_editor_to_active_row()
+        self.var_status.set("已应用当前参数到当前模型")
+
+    def apply_editor_to_selected_rows(self):
+        if not self.rows:
+            return
+        self._save_editor_to_active_row()
+        selected_rows = [row for row in self.rows if row.selected]
+        if not selected_rows:
+            messagebox.showwarning(APP_TITLE, "请先勾选至少一个模型")
+            return
+        template = {
+            "ratio": self.var_editor_ratio.get().strip(),
+            "quality": self.var_editor_quality.get().strip(),
+            "preserve_boundary": self.var_editor_preserve_boundary.get(),
+            "preserve_normal": self.var_editor_preserve_normal.get(),
+            "preserve_topology": self.var_editor_preserve_topology.get(),
+        }
+        for row in selected_rows:
+            row.ratio = template["ratio"]
+            row.quality = template["quality"]
+            row.preserve_boundary = template["preserve_boundary"]
+            row.preserve_normal = template["preserve_normal"]
+            row.preserve_topology = template["preserve_topology"]
+        self._refresh_model_tree()
+        self._load_editor_from_row(self.active_row)
+        self.var_status.set(f"已应用当前参数到 {len(selected_rows)} 个已勾选模型")
+
+    def reset_active_row_defaults(self):
+        if self.active_row is None:
+            messagebox.showwarning(APP_TITLE, "请先选择一个模型")
+            return
+        self.active_row.reset_defaults()
+        self._load_editor_from_row(self.active_row)
+        self._refresh_model_tree()
+
+    def start_active_row_job(self):
+        if self.active_row is None:
+            messagebox.showwarning(APP_TITLE, "请先选择一个模型")
+            return
+        self._save_editor_to_active_row()
+        self.start_single_job(self.active_row, preview=False)
+
+    def preview_active_row_job(self):
+        if self.active_row is None:
+            messagebox.showwarning(APP_TITLE, "请先选择一个模型")
+            return
+        self._save_editor_to_active_row()
+        self.start_single_job(self.active_row, preview=True)
+
     def _capture_profile_payload(self):
+        self._save_editor_to_active_row()
         return {
             "version": 1,
             "app": APP_TITLE,
@@ -375,16 +548,18 @@ class MeshOptApp:
             if state:
                 row.apply_state(state)
         self._sync_select_all_state()
+        self._refresh_model_tree()
+        self._load_editor_from_row(self.active_row)
 
     def toggle_select_all(self):
         checked = self.var_select_all.get()
         for row in self.rows:
-            row.var_selected.set(checked)
+            row.selected = checked
+        self._refresh_model_tree()
+        self._load_editor_from_row(self.active_row)
 
     def _sync_select_all_state(self):
-        if not self.rows:
-            return
-        self.var_select_all.set(all(row.var_selected.get() for row in self.rows))
+        self.var_select_all.set(bool(self.rows) and all(row.selected for row in self.rows))
 
     def _find_data_json(self, source_dir: Path):
         candidates = [source_dir / "data.json", source_dir.parent / "data.json"]
@@ -503,7 +678,8 @@ class MeshOptApp:
         threading.Thread(target=self._run_single_job, args=(row, preview), daemon=True).start()
 
     def start_batch_job(self):
-        selected_rows = [row for row in self.rows if row.var_selected.get()]
+        self._save_editor_to_active_row()
+        selected_rows = [row for row in self.rows if row.selected]
         if not selected_rows:
             messagebox.showwarning(APP_TITLE, "请先勾选至少一个模型")
             return
@@ -669,22 +845,24 @@ class MeshOptApp:
         self.root.after(150, self._poll_queue)
 
     def _apply_loaded_models(self, payload):
-        for row in self.rows:
-            row.frame.destroy()
+        previous_active_name = self.active_row.meta.path.name if self.active_row else None
         self.rows.clear()
-
-        for child in self.inner.winfo_children():
-            child.destroy()
 
         for index, item in enumerate(payload["rows"]):
             if isinstance(item, ModelMeta):
-                row = ModelRow(self.inner, self, item)
-                row.grid(row=index, column=0, sticky="ew", pady=(0, 8))
+                row = ModelRow(item)
                 self.rows.append(row)
-            else:
-                ttk.Label(self.inner, text=item).grid(row=index, column=0, sticky="w")
 
         self.load_running = False
+        self._refresh_model_tree()
+        if self.rows:
+            active_row = next((row for row in self.rows if row.meta.path.name == previous_active_name), self.rows[0])
+            self.active_row = None
+            self._set_active_row(active_row)
+        else:
+            self.active_row = None
+            self._load_editor_from_row(None)
+        self._sync_select_all_state()
         self.var_status.set(payload["status"])
         if self.pending_profile_payload:
             self._apply_profile_to_rows(self.pending_profile_payload)
@@ -693,12 +871,14 @@ class MeshOptApp:
         self.save_settings()
 
     def _update_row_result(self, row: ModelRow, result: dict):
-        row.var_result.set(
-            "结果: "
+        row.result_text = (
             f"target={result['target_faces']}, "
             f"actual={result['new_faces']} faces, "
             f"size={result['output_size_mb']:.2f} MB"
         )
+        self._refresh_model_tree()
+        if row is self.active_row:
+            self._load_editor_from_row(row)
 
     def save_settings(self):
         payload = {
