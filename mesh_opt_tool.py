@@ -18,6 +18,7 @@ APP_TITLE = "OBJ Batch Optimizer"
 DEFAULT_MESHLAB = r"E:\MeshLab\meshlab.exe"
 SETTINGS_PATH = Path(__file__).with_name("mesh_opt_tool_settings.json")
 NODE_CONVERTER = Path(__file__).with_name("obj_to_drc.js")
+MAX_RECENT_PRESETS = 10
 
 
 @dataclass
@@ -109,6 +110,24 @@ class ModelRow:
             "preservetopology": self.var_preserve_topology.get(),
         }
 
+    def export_state(self):
+        return {
+            "selected": self.var_selected.get(),
+            "ratio": self.var_ratio.get().strip(),
+            "quality": self.var_quality.get().strip(),
+            "preserve_boundary": self.var_preserve_boundary.get(),
+            "preserve_normal": self.var_preserve_normal.get(),
+            "preserve_topology": self.var_preserve_topology.get(),
+        }
+
+    def apply_state(self, payload: dict):
+        self.var_selected.set(payload.get("selected", True))
+        self.var_ratio.set(str(payload.get("ratio", "0.10")))
+        self.var_quality.set(str(payload.get("quality", "0.5")))
+        self.var_preserve_boundary.set(bool(payload.get("preserve_boundary", True)))
+        self.var_preserve_normal.set(bool(payload.get("preserve_normal", True)))
+        self.var_preserve_topology.set(bool(payload.get("preserve_topology", True)))
+
     def simplify_one(self):
         self.app.start_single_job(self, preview=False)
 
@@ -137,8 +156,11 @@ class MeshOptApp:
         self.var_select_all = tk.BooleanVar(value=True)
         self.var_generate_data_json = tk.BooleanVar(value=True)
         self.var_status = tk.StringVar(value="就绪")
+        self.recent_profile_paths = []
+        self.pending_profile_payload = None
 
         self._load_settings()
+        self._build_menu()
         self._build_ui()
         self.root.after(150, self._poll_queue)
 
@@ -186,6 +208,8 @@ class MeshOptApp:
         ttk.Button(controls, text="刷新模型列表", command=self.load_models_async).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(controls, text="批量减面已勾选", command=self.start_batch_job).grid(row=0, column=3, padx=(0, 8))
         ttk.Button(controls, text="保存设置", command=self.save_settings).grid(row=0, column=4)
+        ttk.Button(controls, text="保存参数JSON", command=self.save_profile_as).grid(row=0, column=5, padx=(8, 0))
+        ttk.Button(controls, text="加载参数JSON", command=self.load_profile_from_dialog).grid(row=0, column=6, padx=(8, 0))
 
         center = ttk.Frame(self.root, padding=(10, 0, 10, 0))
         center.grid(row=1, column=0, sticky="nsew")
@@ -206,6 +230,35 @@ class MeshOptApp:
         bottom.grid(row=2, column=0, sticky="ew")
         bottom.columnconfigure(0, weight=1)
         ttk.Label(bottom, textvariable=self.var_status).grid(row=0, column=0, sticky="w")
+
+    def _build_menu(self):
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="加载参数 JSON...", command=self.load_profile_from_dialog)
+        file_menu.add_command(label="保存参数 JSON...", command=self.save_profile_as)
+        file_menu.add_separator()
+        self.recent_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="最近打开的模型", menu=self.recent_menu)
+        menubar.add_cascade(label="文件", menu=file_menu)
+        self.root.config(menu=menubar)
+        self._refresh_recent_menu()
+
+    def _refresh_recent_menu(self):
+        self.recent_menu.delete(0, "end")
+        valid_paths = []
+        for raw_path in self.recent_profile_paths:
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if path.exists() and path.suffix.lower() == ".json":
+                valid_paths.append(str(path))
+        self.recent_profile_paths = valid_paths[:MAX_RECENT_PRESETS]
+        if not self.recent_profile_paths:
+            self.recent_menu.add_command(label="暂无", state="disabled")
+            return
+        for raw_path in self.recent_profile_paths:
+            path = Path(raw_path)
+            self.recent_menu.add_command(label=path.name, command=lambda p=raw_path: self.load_profile_file(Path(p)))
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -241,10 +294,97 @@ class MeshOptApp:
             self.var_meshlab_path.set(path)
             self.save_settings()
 
+    def _capture_profile_payload(self):
+        return {
+            "version": 1,
+            "app": APP_TITLE,
+            "source_dir": self.var_source_dir.get(),
+            "output_dir": self.var_output_dir.get(),
+            "drc_input_dir": self.var_drc_input_dir.get(),
+            "drc_output_dir": self.var_drc_output_dir.get(),
+            "meshlab_path": self.var_meshlab_path.get(),
+            "generate_data_json": self.var_generate_data_json.get(),
+            "select_all": self.var_select_all.get(),
+            "models": {row.meta.path.name: row.export_state() for row in self.rows},
+        }
+
+    def save_profile_as(self):
+        initial_dir = self._resolve_initial_dir(self.var_source_dir.get() or Path.cwd())
+        path = filedialog.asksaveasfilename(
+            initialdir=initial_dir,
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json")],
+            title="保存参数 JSON",
+        )
+        if not path:
+            return
+        profile_path = Path(path)
+        profile_path.write_text(json.dumps(self._capture_profile_payload(), indent=2, ensure_ascii=False), encoding="utf-8")
+        self._remember_recent_profile(profile_path)
+        self.var_status.set(f"参数已保存: {profile_path}")
+
+    def load_profile_from_dialog(self):
+        initial_dir = self._resolve_initial_dir(self.var_source_dir.get() or Path.cwd())
+        path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            filetypes=[("JSON Files", "*.json")],
+            title="加载参数 JSON",
+        )
+        if path:
+            self.load_profile_file(Path(path))
+
+    def load_profile_file(self, profile_path: Path):
+        try:
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("app") != APP_TITLE or "models" not in payload:
+                raise ValueError("这不是减面工具的参数 JSON")
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"加载参数 JSON 失败: {exc}")
+            return
+        self._remember_recent_profile(profile_path)
+        self._apply_profile_payload(payload, profile_path)
+
+    def _remember_recent_profile(self, profile_path: Path):
+        normalized = str(profile_path)
+        self.recent_profile_paths = [item for item in self.recent_profile_paths if item != normalized]
+        self.recent_profile_paths.insert(0, normalized)
+        self.recent_profile_paths = self.recent_profile_paths[:MAX_RECENT_PRESETS]
+        self._refresh_recent_menu()
+        self.save_settings()
+
+    def _apply_profile_payload(self, payload: dict, profile_path: Path | None = None):
+        self.var_source_dir.set(str(payload.get("source_dir", self.var_source_dir.get())))
+        self.var_output_dir.set(str(payload.get("output_dir", self.var_output_dir.get())))
+        self.var_drc_input_dir.set(str(payload.get("drc_input_dir", self.var_drc_input_dir.get())))
+        self.var_drc_output_dir.set(str(payload.get("drc_output_dir", self.var_drc_output_dir.get())))
+        self.var_meshlab_path.set(str(payload.get("meshlab_path", self.var_meshlab_path.get())))
+        self.var_generate_data_json.set(bool(payload.get("generate_data_json", self.var_generate_data_json.get())))
+        self.var_select_all.set(bool(payload.get("select_all", self.var_select_all.get())))
+        self.pending_profile_payload = payload
+        self.save_settings()
+        self.load_models_async()
+        suffix = f": {profile_path}" if profile_path else ""
+        self.var_status.set(f"正在加载参数{suffix}")
+
+    def _apply_profile_to_rows(self, payload: dict):
+        model_state = payload.get("models", {})
+        if not isinstance(model_state, dict):
+            model_state = {}
+        for row in self.rows:
+            state = model_state.get(row.meta.path.name) or model_state.get(row.meta.path.stem)
+            if state:
+                row.apply_state(state)
+        self._sync_select_all_state()
+
     def toggle_select_all(self):
         checked = self.var_select_all.get()
         for row in self.rows:
             row.var_selected.set(checked)
+
+    def _sync_select_all_state(self):
+        if not self.rows:
+            return
+        self.var_select_all.set(all(row.var_selected.get() for row in self.rows))
 
     def _find_data_json(self, source_dir: Path):
         candidates = [source_dir / "data.json", source_dir.parent / "data.json"]
@@ -546,6 +686,10 @@ class MeshOptApp:
 
         self.load_running = False
         self.var_status.set(payload["status"])
+        if self.pending_profile_payload:
+            self._apply_profile_to_rows(self.pending_profile_payload)
+            self.pending_profile_payload = None
+            self.var_status.set(f"{payload['status']} 已应用参数 JSON。")
         self.save_settings()
 
     def _update_row_result(self, row: ModelRow, result: dict):
@@ -564,6 +708,7 @@ class MeshOptApp:
             "drc_output_dir": self.var_drc_output_dir.get(),
             "meshlab_path": self.var_meshlab_path.get(),
             "generate_data_json": self.var_generate_data_json.get(),
+            "recent_profile_paths": self.recent_profile_paths,
         }
         SETTINGS_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -582,12 +727,14 @@ class MeshOptApp:
             self.var_drc_output_dir.set(payload.get("drc_output_dir", str(Path.cwd().parent / "tool_output_drc")))
             self.var_meshlab_path.set(payload.get("meshlab_path", DEFAULT_MESHLAB))
             self.var_generate_data_json.set(payload.get("generate_data_json", True))
+            self.recent_profile_paths = payload.get("recent_profile_paths", [])
         except Exception:
             self.var_source_dir.set(str(Path.cwd().parent / "obj_out"))
             self.var_output_dir.set(str(Path.cwd().parent / "tool_output"))
             self.var_drc_input_dir.set(str(Path.cwd().parent / "tool_output"))
             self.var_drc_output_dir.set(str(Path.cwd().parent / "tool_output_drc"))
             self.var_meshlab_path.set(DEFAULT_MESHLAB)
+            self.recent_profile_paths = []
 
     def on_close(self):
         self.save_settings()
