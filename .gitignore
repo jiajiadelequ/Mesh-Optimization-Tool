@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+# Local machine settings
+mesh_opt_tool_settings.json
+
+# Common runtime outputs
+*.log
+*.tmp
+*.bak
+
+# Future JS dependency directory
+node_modules/
