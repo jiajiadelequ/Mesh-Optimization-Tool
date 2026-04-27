@@ -11,14 +11,23 @@ import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import pymeshlab as ml
+from fbx_pipeline import optimize_model
 
 
-APP_TITLE = "OBJ Batch Optimizer"
-DEFAULT_MESHLAB = r"E:\MeshLab\meshlab.exe"
+APP_TITLE = "Mesh Batch Optimizer"
+DEFAULT_BLENDER = r"F:\Blender\blender.exe"
 SETTINGS_PATH = Path(__file__).with_name("mesh_opt_tool_settings.json")
 NODE_CONVERTER = Path(__file__).with_name("obj_to_drc.js")
 MAX_RECENT_PRESETS = 10
+SUPPORTED_INPUT_SUFFIXES = {".obj", ".fbx"}
+OBJ_SUFFIX = ".obj"
+FBX_SUFFIX = ".fbx"
+ALGORITHM_LABEL_TO_CODE = {
+    "通用减面（Collapse）": "COLLAPSE",
+    "规整网格回退（Un-Subdivide）": "UNSUBDIV",
+    "平面合并（Planar Dissolve）": "DISSOLVE",
+}
+ALGORITHM_CODE_TO_LABEL = {value: key for key, value in ALGORITHM_LABEL_TO_CODE.items()}
 
 
 @dataclass
@@ -28,62 +37,146 @@ class ModelMeta:
     group_name: str
     source_size: int
 
+    @property
+    def format_label(self):
+        return self.path.suffix.lower().lstrip(".").upper() or "UNKNOWN"
 
-def list_obj_files(directory: Path):
+
+def list_model_files(source_path: Path):
+    if source_path.is_file():
+        return [source_path] if source_path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES else []
     return sorted(
-        (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".obj"),
+        (
+            path
+            for path in source_path.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES
+        ),
         key=lambda p: p.stat().st_size,
         reverse=True,
     )
+
+
+def list_obj_files(directory: Path):
+    return [path for path in list_model_files(directory) if path.suffix.lower() == OBJ_SUFFIX]
+
+
+def source_root_for_metadata(source_path: Path) -> Path:
+    return source_path if source_path.is_dir() else source_path.parent
+
+
+def build_output_path(row: ModelMeta, output_dir: Path, preview: bool = False) -> Path:
+    suffix = row.path.suffix.lower()
+    name = f"{row.path.stem}_{'preview' if preview else 'optimized'}{suffix}"
+    return output_dir / name
 
 
 class ModelRow:
     def __init__(self, meta: ModelMeta):
         self.meta = meta
         self.selected = True
-        self.ratio = "0.10"
-        self.quality = "0.5"
-        self.preserve_boundary = True
-        self.preserve_normal = True
-        self.preserve_topology = True
+        self.algorithm = "COLLAPSE"
+        self.algorithm_value = "0.10"
+        self.use_symmetry = False
+        self.symmetry_axis = "X"
+        self.triangulate = True
         self.result_text = "未处理"
 
     def reset_defaults(self):
-        self.ratio = "0.10"
-        self.quality = "0.5"
-        self.preserve_boundary = True
-        self.preserve_normal = True
-        self.preserve_topology = True
+        self.algorithm = "COLLAPSE"
+        self.algorithm_value = "0.10"
+        self.use_symmetry = False
+        self.symmetry_axis = "X"
+        self.triangulate = True
         self.result_text = "未处理"
 
     def current_params(self):
-        ratio = float(self.ratio.strip())
-        quality = float(self.quality.strip())
-        return {
-            "ratio": ratio,
-            "qualitythr": quality,
-            "preserveboundary": self.preserve_boundary,
-            "preservenormal": self.preserve_normal,
-            "preservetopology": self.preserve_topology,
-        }
+        algorithm = self.algorithm.strip().upper() or "COLLAPSE"
+        raw_value = self.algorithm_value.strip()
+        symmetry_axis = self.symmetry_axis.strip().upper()
+        if symmetry_axis not in {"X", "Y", "Z"}:
+            raise ValueError("对称方向只能是 X、Y 或 Z")
+        if algorithm == "COLLAPSE":
+            ratio = float(raw_value)
+            if ratio <= 0 or ratio > 1:
+                raise ValueError("保留比例必须大于 0 且不超过 1，例如 0.1")
+            return {
+                "algorithm": algorithm,
+                "ratio": ratio,
+                "use_symmetry": self.use_symmetry,
+                "symmetry_axis": symmetry_axis,
+                "triangulate": self.triangulate,
+            }
+        if algorithm == "UNSUBDIV":
+            iterations = int(raw_value)
+            if iterations < 1 or iterations > 32:
+                raise ValueError("迭代次数建议填 1 到 32 的整数")
+            return {
+                "algorithm": algorithm,
+                "iterations": iterations,
+            }
+        if algorithm == "DISSOLVE":
+            angle_limit = float(raw_value)
+            if angle_limit < 0 or angle_limit > 180:
+                raise ValueError("平面合并角度必须在 0 到 180 之间，例如 5 或 15")
+            return {
+                "algorithm": algorithm,
+                "angle_limit": angle_limit,
+            }
+        raise ValueError("不支持的减面算法")
 
     def export_state(self):
         return {
             "selected": self.selected,
-            "ratio": self.ratio.strip(),
-            "quality": self.quality.strip(),
-            "preserve_boundary": self.preserve_boundary,
-            "preserve_normal": self.preserve_normal,
-            "preserve_topology": self.preserve_topology,
+            "algorithm": self.algorithm,
+            "algorithm_value": self.algorithm_value.strip(),
+            "use_symmetry": self.use_symmetry,
+            "symmetry_axis": self.symmetry_axis,
+            "triangulate": self.triangulate,
         }
 
     def apply_state(self, payload: dict):
         self.selected = bool(payload.get("selected", True))
-        self.ratio = str(payload.get("ratio", "0.10"))
-        self.quality = str(payload.get("quality", "0.5"))
-        self.preserve_boundary = bool(payload.get("preserve_boundary", True))
-        self.preserve_normal = bool(payload.get("preserve_normal", True))
-        self.preserve_topology = bool(payload.get("preserve_topology", True))
+        self.algorithm = str(payload.get("algorithm", "COLLAPSE")).upper()
+        self.algorithm_value = str(payload.get("algorithm_value", payload.get("ratio", "0.10")))
+        self.use_symmetry = bool(payload.get("use_symmetry", payload.get("preserve_topology", False)))
+        self.symmetry_axis = str(payload.get("symmetry_axis", "X")).upper()
+        self.triangulate = bool(payload.get("triangulate", True))
+
+
+class ToolTip:
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        self.widget.bind("<Enter>", self.show)
+        self.widget.bind("<Leave>", self.hide)
+        self.widget.bind("<ButtonPress>", self.hide)
+
+    def show(self, _event=None):
+        if self.tip_window or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw,
+            text=self.text,
+            justify="left",
+            background="#fff8dc",
+            relief="solid",
+            borderwidth=1,
+            wraplength=280,
+            padx=8,
+            pady=6,
+        )
+        label.pack()
+
+    def hide(self, _event=None):
+        if self.tip_window is not None:
+            self.tip_window.destroy()
+            self.tip_window = None
 
 
 class MeshOptApp:
@@ -99,20 +192,21 @@ class MeshOptApp:
         self.load_running = False
         self.loading_total = 0
 
-        self.var_source_dir = tk.StringVar()
+        self.var_source_path = tk.StringVar()
         self.var_output_dir = tk.StringVar()
         self.var_drc_input_dir = tk.StringVar()
         self.var_drc_output_dir = tk.StringVar()
-        self.var_meshlab_path = tk.StringVar(value=DEFAULT_MESHLAB)
+        self.var_blender_path = tk.StringVar(value=DEFAULT_BLENDER)
         self.var_select_all = tk.BooleanVar(value=True)
         self.var_generate_data_json = tk.BooleanVar(value=True)
         self.var_status = tk.StringVar(value="就绪")
         self.var_editor_selected = tk.BooleanVar(value=True)
-        self.var_editor_ratio = tk.StringVar(value="0.10")
-        self.var_editor_quality = tk.StringVar(value="0.5")
-        self.var_editor_preserve_boundary = tk.BooleanVar(value=True)
-        self.var_editor_preserve_normal = tk.BooleanVar(value=True)
-        self.var_editor_preserve_topology = tk.BooleanVar(value=True)
+        self.var_editor_algorithm = tk.StringVar(value=ALGORITHM_CODE_TO_LABEL["COLLAPSE"])
+        self.var_editor_algorithm_value = tk.StringVar(value="0.10")
+        self.var_editor_use_symmetry = tk.BooleanVar(value=False)
+        self.var_editor_symmetry_axis = tk.StringVar(value="X")
+        self.var_editor_triangulate = tk.BooleanVar(value=True)
+        self.var_editor_primary_label = tk.StringVar(value="保留比例")
         self.var_editor_name = tk.StringVar(value="未选择模型")
         self.var_editor_group = tk.StringVar(value="-")
         self.var_editor_size = tk.StringVar(value="-")
@@ -126,9 +220,9 @@ class MeshOptApp:
         self._build_ui()
         self.root.after(150, self._poll_queue)
 
-        source_dir = Path(self.var_source_dir.get()) if self.var_source_dir.get() else Path.cwd().parent / "obj_out"
-        if source_dir.exists():
-            self.var_source_dir.set(str(source_dir))
+        source_path = Path(self.var_source_path.get()) if self.var_source_path.get() else Path.cwd().parent / "obj_out"
+        if source_path.exists():
+            self.var_source_path.set(str(source_path))
             self.load_models_async()
 
     def _build_ui(self):
@@ -140,18 +234,21 @@ class MeshOptApp:
         top.columnconfigure(1, weight=1)
         top.columnconfigure(4, weight=1)
 
-        ttk.Label(top, text="原始 OBJ 目录").grid(row=0, column=0, sticky="w")
-        ttk.Entry(top, textvariable=self.var_source_dir).grid(row=0, column=1, sticky="ew", padx=(6, 6))
-        ttk.Button(top, text="选择", command=self.choose_source_dir).grid(row=0, column=2, padx=(0, 12))
+        ttk.Label(top, text="原始模型目录/文件").grid(row=0, column=0, sticky="w")
+        ttk.Entry(top, textvariable=self.var_source_path).grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        source_actions = ttk.Frame(top)
+        source_actions.grid(row=0, column=2, padx=(0, 12), sticky="w")
+        ttk.Button(source_actions, text="目录", command=self.choose_source_dir).grid(row=0, column=0)
+        ttk.Button(source_actions, text="文件", command=self.choose_source_file).grid(row=0, column=1, padx=(6, 0))
 
         ttk.Label(top, text="输出目录").grid(row=0, column=3, sticky="w")
         ttk.Entry(top, textvariable=self.var_output_dir).grid(row=0, column=4, sticky="ew", padx=(6, 6))
         ttk.Button(top, text="选择", command=self.choose_output_dir).grid(row=0, column=5)
         ttk.Button(top, text="打包并复制到 PICO", command=self.start_export_zip_to_pico).grid(row=0, column=6, padx=(8, 0))
 
-        ttk.Label(top, text="MeshLab").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(top, textvariable=self.var_meshlab_path).grid(row=1, column=1, columnspan=4, sticky="ew", padx=(6, 6), pady=(8, 0))
-        ttk.Button(top, text="选择", command=self.choose_meshlab).grid(row=1, column=5, pady=(8, 0))
+        ttk.Label(top, text="Blender").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(top, textvariable=self.var_blender_path).grid(row=1, column=1, columnspan=4, sticky="ew", padx=(6, 6), pady=(8, 0))
+        ttk.Button(top, text="选择", command=self.choose_blender).grid(row=1, column=5, pady=(8, 0))
 
         ttk.Label(top, text="DRC 输入目录").grid(row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(top, textvariable=self.var_drc_input_dir).grid(row=2, column=1, columnspan=4, sticky="ew", padx=(6, 6), pady=(8, 0))
@@ -220,13 +317,49 @@ class MeshOptApp:
         param_box = ttk.LabelFrame(right_panel, text="减面参数", padding=10)
         param_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         ttk.Checkbutton(param_box, text="纳入批量处理", variable=self.var_editor_selected, command=self._on_editor_selection_change).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(param_box, text="比例").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Entry(param_box, textvariable=self.var_editor_ratio, width=10).grid(row=1, column=1, sticky="w", pady=(10, 0))
-        ttk.Label(param_box, text="Quality").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(param_box, textvariable=self.var_editor_quality, width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(param_box, text="Boundary", variable=self.var_editor_preserve_boundary).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(param_box, text="Normal", variable=self.var_editor_preserve_normal).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(param_box, text="Topology", variable=self.var_editor_preserve_topology).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        algorithm_label = ttk.Label(param_box, text="减面算法")
+        algorithm_label.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        algorithm_combo = ttk.Combobox(
+            param_box,
+            textvariable=self.var_editor_algorithm,
+            width=16,
+            state="readonly",
+            values=tuple(ALGORITHM_LABEL_TO_CODE.keys()),
+        )
+        algorithm_combo.grid(row=1, column=1, sticky="w", pady=(10, 0))
+        algorithm_combo.bind("<<ComboboxSelected>>", self._on_algorithm_change)
+
+        self.primary_label_widget = ttk.Label(param_box, textvariable=self.var_editor_primary_label)
+        self.primary_label_widget.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.primary_entry_widget = ttk.Entry(param_box, textvariable=self.var_editor_algorithm_value, width=10)
+        self.primary_entry_widget.grid(row=2, column=1, sticky="w", pady=(10, 0))
+
+        self.symmetry_check = ttk.Checkbutton(param_box, text="开启对称保护", variable=self.var_editor_use_symmetry)
+        self.symmetry_check.grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        axis_label = ttk.Label(param_box, text="对称方向")
+        axis_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.axis_combo = ttk.Combobox(param_box, textvariable=self.var_editor_symmetry_axis, width=8, state="readonly", values=("X", "Y", "Z"))
+        self.axis_combo.grid(row=4, column=1, sticky="w", pady=(8, 0))
+
+        self.triangulate_check = ttk.Checkbutton(param_box, text="保持三角面", variable=self.var_editor_triangulate)
+        self.triangulate_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        self._attach_tooltip(
+            [algorithm_label, algorithm_combo],
+            "这里可以选 Blender 的三种减面方式。Collapse 最通用，Un-Subdivide 适合规整网格，Dissolve 适合大片平面。",
+        )
+        self.primary_tooltips = self._attach_tooltip([self.primary_label_widget, self.primary_entry_widget], "")
+        self._attach_tooltip([self.symmetry_check], "如果模型本来左右或前后差不多，打开它后，Blender 会尽量按对称方式一起减面。人物、车、机械这类模型通常比较适合。")
+        self._attach_tooltip(
+            [axis_label, self.axis_combo],
+            "告诉 Blender 模型是按哪条方向对称的。大多数左右对称的人物或道具常用 X 轴，选错了也不会坏，但效果可能不明显。",
+        )
+        self._attach_tooltip(
+            [self.triangulate_check],
+            "打开后，减面结果会尽量保持三角形面片，通常更适合游戏引擎和跨软件导入。关闭后面片形状可能更自然，但别的软件再次导入时也可能自己重新切三角。",
+        )
+        self._update_algorithm_ui()
 
         editor_actions = ttk.Frame(right_panel)
         editor_actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 0))
@@ -245,6 +378,35 @@ class MeshOptApp:
         bottom.grid(row=2, column=0, sticky="ew")
         bottom.columnconfigure(0, weight=1)
         ttk.Label(bottom, textvariable=self.var_status).grid(row=0, column=0, sticky="w")
+
+    def _attach_tooltip(self, widgets, text: str):
+        tooltips = []
+        for widget in widgets:
+            tooltips.append(ToolTip(widget, text))
+        return tooltips
+
+    def _update_algorithm_ui(self):
+        algorithm = ALGORITHM_LABEL_TO_CODE.get(self.var_editor_algorithm.get().strip(), "COLLAPSE")
+        if algorithm == "UNSUBDIV":
+            self.var_editor_primary_label.set("迭代次数")
+            self.primary_tooltip_text = "这个模式更适合原本很规整、像是细分过很多次的模型。数字越大，往回收得越狠，网格会一层层变粗。"
+            self.symmetry_check.state(["disabled"])
+            self.axis_combo.state(["disabled"])
+            self.triangulate_check.state(["disabled"])
+        elif algorithm == "DISSOLVE":
+            self.var_editor_primary_label.set("平面合并角度")
+            self.primary_tooltip_text = "这个模式更适合建筑、机械、墙面这类比较平的模型。数字越大，越容易把差不多在一个平面上的小碎面合并掉。"
+            self.symmetry_check.state(["disabled"])
+            self.axis_combo.state(["disabled"])
+            self.triangulate_check.state(["disabled"])
+        else:
+            self.var_editor_primary_label.set("保留比例")
+            self.primary_tooltip_text = "想象成减面后还想保留多少细节。0.10 表示大约保留 10% 的面，模型会轻很多，但细节也会少一些。"
+            self.symmetry_check.state(["!disabled"])
+            self.axis_combo.state(["!disabled"])
+            self.triangulate_check.state(["!disabled"])
+        for tooltip in getattr(self, "primary_tooltips", []):
+            tooltip.text = self.primary_tooltip_text
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
@@ -279,9 +441,19 @@ class MeshOptApp:
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def choose_source_dir(self):
-        path = filedialog.askdirectory(initialdir=self._resolve_initial_dir(self.var_source_dir.get()))
+        path = filedialog.askdirectory(initialdir=self._resolve_initial_dir(self.var_source_path.get()))
         if path:
-            self.var_source_dir.set(path)
+            self.var_source_path.set(path)
+            self.save_settings()
+            self.load_models_async()
+
+    def choose_source_file(self):
+        path = filedialog.askopenfilename(
+            initialdir=self._resolve_initial_dir(self.var_source_path.get()),
+            filetypes=[("Model Files", "*.obj *.fbx"), ("OBJ Files", "*.obj"), ("FBX Files", "*.fbx")],
+        )
+        if path:
+            self.var_source_path.set(path)
             self.save_settings()
             self.load_models_async()
 
@@ -303,16 +475,19 @@ class MeshOptApp:
             self.var_drc_output_dir.set(path)
             self.save_settings()
 
-    def choose_meshlab(self):
-        path = filedialog.askopenfilename(initialdir=self._resolve_initial_dir(Path(self.var_meshlab_path.get()).parent if self.var_meshlab_path.get() else Path.cwd()), filetypes=[("Executable", "*.exe")])
+    def choose_blender(self):
+        path = filedialog.askopenfilename(
+            initialdir=self._resolve_initial_dir(Path(self.var_blender_path.get()).parent if self.var_blender_path.get() else Path.cwd()),
+            filetypes=[("Executable", "*.exe")],
+        )
         if path:
-            self.var_meshlab_path.set(path)
+            self.var_blender_path.set(path)
             self.save_settings()
 
     def _row_tree_values(self, row: ModelRow):
         return (
             "是" if row.selected else "否",
-            row.meta.display_name,
+            f"{row.meta.display_name} [{row.meta.format_label}]",
             row.meta.group_name or "-",
             f"{row.meta.source_size / 1024 / 1024:.2f}",
             row.result_text,
@@ -341,33 +516,35 @@ class MeshOptApp:
             self.var_editor_group.set("-")
             self.var_editor_size.set("-")
             self.var_editor_selected.set(True)
-            self.var_editor_ratio.set("0.10")
-            self.var_editor_quality.set("0.5")
-            self.var_editor_preserve_boundary.set(True)
-            self.var_editor_preserve_normal.set(True)
-            self.var_editor_preserve_topology.set(True)
+            self.var_editor_algorithm.set(ALGORITHM_CODE_TO_LABEL["COLLAPSE"])
+            self.var_editor_algorithm_value.set("0.10")
+            self.var_editor_use_symmetry.set(False)
+            self.var_editor_symmetry_axis.set("X")
+            self.var_editor_triangulate.set(True)
+            self._update_algorithm_ui()
             self.var_editor_result.set("结果: 未处理")
             return
-        self.var_editor_name.set(f"{row.meta.display_name} [{row.meta.path.name}]")
+        self.var_editor_name.set(f"{row.meta.display_name} [{row.meta.path.name} | {row.meta.format_label}]")
         self.var_editor_group.set(row.meta.group_name or "-")
         self.var_editor_size.set(f"{row.meta.source_size / 1024 / 1024:.2f} MB")
         self.var_editor_selected.set(row.selected)
-        self.var_editor_ratio.set(row.ratio)
-        self.var_editor_quality.set(row.quality)
-        self.var_editor_preserve_boundary.set(row.preserve_boundary)
-        self.var_editor_preserve_normal.set(row.preserve_normal)
-        self.var_editor_preserve_topology.set(row.preserve_topology)
+        self.var_editor_algorithm.set(ALGORITHM_CODE_TO_LABEL.get(row.algorithm, ALGORITHM_CODE_TO_LABEL["COLLAPSE"]))
+        self.var_editor_algorithm_value.set(row.algorithm_value)
+        self.var_editor_use_symmetry.set(row.use_symmetry)
+        self.var_editor_symmetry_axis.set(row.symmetry_axis)
+        self.var_editor_triangulate.set(row.triangulate)
+        self._update_algorithm_ui()
         self.var_editor_result.set(f"结果: {row.result_text}")
 
     def _save_editor_to_active_row(self):
         if self.active_row is None:
             return
         self.active_row.selected = self.var_editor_selected.get()
-        self.active_row.ratio = self.var_editor_ratio.get().strip()
-        self.active_row.quality = self.var_editor_quality.get().strip()
-        self.active_row.preserve_boundary = self.var_editor_preserve_boundary.get()
-        self.active_row.preserve_normal = self.var_editor_preserve_normal.get()
-        self.active_row.preserve_topology = self.var_editor_preserve_topology.get()
+        self.active_row.algorithm = ALGORITHM_LABEL_TO_CODE.get(self.var_editor_algorithm.get().strip(), "COLLAPSE")
+        self.active_row.algorithm_value = self.var_editor_algorithm_value.get().strip()
+        self.active_row.use_symmetry = self.var_editor_use_symmetry.get()
+        self.active_row.symmetry_axis = self.var_editor_symmetry_axis.get().strip().upper()
+        self.active_row.triangulate = self.var_editor_triangulate.get()
         self._refresh_model_tree()
         self._sync_select_all_state()
 
@@ -393,6 +570,16 @@ class MeshOptApp:
         self.active_row.selected = self.var_editor_selected.get()
         self._refresh_model_tree()
         self._sync_select_all_state()
+
+    def _on_algorithm_change(self, _event=None):
+        algorithm = ALGORITHM_LABEL_TO_CODE.get(self.var_editor_algorithm.get().strip(), "COLLAPSE")
+        if algorithm == "UNSUBDIV" and self.var_editor_algorithm_value.get().strip() in {"", "0.10", "5"}:
+            self.var_editor_algorithm_value.set("2")
+        elif algorithm == "DISSOLVE" and self.var_editor_algorithm_value.get().strip() in {"", "0.10", "2"}:
+            self.var_editor_algorithm_value.set("5")
+        elif algorithm == "COLLAPSE" and self.var_editor_algorithm_value.get().strip() in {"", "2", "5"}:
+            self.var_editor_algorithm_value.set("0.10")
+        self._update_algorithm_ui()
 
     def select_all_rows(self):
         for row in self.rows:
@@ -428,18 +615,18 @@ class MeshOptApp:
             messagebox.showwarning(APP_TITLE, "请先勾选至少一个模型")
             return
         template = {
-            "ratio": self.var_editor_ratio.get().strip(),
-            "quality": self.var_editor_quality.get().strip(),
-            "preserve_boundary": self.var_editor_preserve_boundary.get(),
-            "preserve_normal": self.var_editor_preserve_normal.get(),
-            "preserve_topology": self.var_editor_preserve_topology.get(),
+            "algorithm": ALGORITHM_LABEL_TO_CODE.get(self.var_editor_algorithm.get().strip(), "COLLAPSE"),
+            "algorithm_value": self.var_editor_algorithm_value.get().strip(),
+            "use_symmetry": self.var_editor_use_symmetry.get(),
+            "symmetry_axis": self.var_editor_symmetry_axis.get().strip().upper(),
+            "triangulate": self.var_editor_triangulate.get(),
         }
         for row in selected_rows:
-            row.ratio = template["ratio"]
-            row.quality = template["quality"]
-            row.preserve_boundary = template["preserve_boundary"]
-            row.preserve_normal = template["preserve_normal"]
-            row.preserve_topology = template["preserve_topology"]
+            row.algorithm = template["algorithm"]
+            row.algorithm_value = template["algorithm_value"]
+            row.use_symmetry = template["use_symmetry"]
+            row.symmetry_axis = template["symmetry_axis"]
+            row.triangulate = template["triangulate"]
         self._refresh_model_tree()
         self._load_editor_from_row(self.active_row)
         self.var_status.set(f"已应用当前参数到 {len(selected_rows)} 个已勾选模型")
@@ -471,18 +658,18 @@ class MeshOptApp:
         return {
             "version": 1,
             "app": APP_TITLE,
-            "source_dir": self.var_source_dir.get(),
+            "source_path": self.var_source_path.get(),
             "output_dir": self.var_output_dir.get(),
             "drc_input_dir": self.var_drc_input_dir.get(),
             "drc_output_dir": self.var_drc_output_dir.get(),
-            "meshlab_path": self.var_meshlab_path.get(),
+            "blender_path": self.var_blender_path.get(),
             "generate_data_json": self.var_generate_data_json.get(),
             "select_all": self.var_select_all.get(),
             "models": {row.meta.path.name: row.export_state() for row in self.rows},
         }
 
     def save_profile_as(self):
-        initial_dir = self._resolve_initial_dir(self.var_source_dir.get() or Path.cwd())
+        initial_dir = self._resolve_initial_dir(self.var_source_path.get() or Path.cwd())
         path = filedialog.asksaveasfilename(
             initialdir=initial_dir,
             defaultextension=".json",
@@ -497,7 +684,7 @@ class MeshOptApp:
         self.var_status.set(f"参数已保存: {profile_path}")
 
     def load_profile_from_dialog(self):
-        initial_dir = self._resolve_initial_dir(self.var_source_dir.get() or Path.cwd())
+        initial_dir = self._resolve_initial_dir(self.var_source_path.get() or Path.cwd())
         path = filedialog.askopenfilename(
             initialdir=initial_dir,
             filetypes=[("JSON Files", "*.json")],
@@ -526,11 +713,11 @@ class MeshOptApp:
         self.save_settings()
 
     def _apply_profile_payload(self, payload: dict, profile_path: Path | None = None):
-        self.var_source_dir.set(str(payload.get("source_dir", self.var_source_dir.get())))
+        self.var_source_path.set(str(payload.get("source_path", payload.get("source_dir", self.var_source_path.get()))))
         self.var_output_dir.set(str(payload.get("output_dir", self.var_output_dir.get())))
         self.var_drc_input_dir.set(str(payload.get("drc_input_dir", self.var_drc_input_dir.get())))
         self.var_drc_output_dir.set(str(payload.get("drc_output_dir", self.var_drc_output_dir.get())))
-        self.var_meshlab_path.set(str(payload.get("meshlab_path", self.var_meshlab_path.get())))
+        self.var_blender_path.set(str(payload.get("blender_path", self.var_blender_path.get())))
         self.var_generate_data_json.set(bool(payload.get("generate_data_json", self.var_generate_data_json.get())))
         self.var_select_all.set(bool(payload.get("select_all", self.var_select_all.get())))
         self.pending_profile_payload = payload
@@ -561,8 +748,9 @@ class MeshOptApp:
     def _sync_select_all_state(self):
         self.var_select_all.set(bool(self.rows) and all(row.selected for row in self.rows))
 
-    def _find_data_json(self, source_dir: Path):
-        candidates = [source_dir / "data.json", source_dir.parent / "data.json"]
+    def _find_data_json(self, source_path: Path):
+        source_root = source_root_for_metadata(source_path)
+        candidates = [source_root / "data.json", source_root.parent / "data.json"]
         for candidate in candidates:
             if candidate.exists():
                 return candidate
@@ -579,9 +767,9 @@ class MeshOptApp:
                 return str(parent)
         return str(Path.cwd())
 
-    def _load_name_map(self, source_dir: Path):
+    def _load_name_map(self, source_path: Path):
         mapping = {}
-        data_json = self._find_data_json(source_dir)
+        data_json = self._find_data_json(source_path)
         if not data_json:
             return mapping
         try:
@@ -607,46 +795,48 @@ class MeshOptApp:
         threading.Thread(target=self._load_models_worker, daemon=True).start()
 
     def _load_models_worker(self):
-        source_dir = Path(self.var_source_dir.get().strip()) if self.var_source_dir.get().strip() else Path.cwd().parent / "obj_out"
-        if not source_dir.exists():
-            self.job_queue.put(("loaded_models", {"rows": [], "status": "源目录不存在"}))
+        source_path = Path(self.var_source_path.get().strip()) if self.var_source_path.get().strip() else Path.cwd().parent / "obj_out"
+        if not source_path.exists():
+            self.job_queue.put(("loaded_models", {"rows": [], "status": "源路径不存在"}))
             return
 
-        name_map = self._load_name_map(source_dir)
-        obj_paths = list_obj_files(source_dir)
-        self.loading_total = len(obj_paths)
+        name_map = self._load_name_map(source_path)
+        model_paths = list_model_files(source_path)
+        self.loading_total = len(model_paths)
         loaded_rows = []
-        for index, path in enumerate(obj_paths):
+        for index, path in enumerate(model_paths):
             try:
                 meta_info = name_map.get(path.stem, {})
                 meta = ModelMeta(path=path, display_name=meta_info.get("display_name", path.stem), group_name=meta_info.get("group_name", ""), source_size=path.stat().st_size)
                 loaded_rows.append(meta)
-                self.job_queue.put(("load_progress", f"正在后台加载模型列表... {index + 1}/{len(obj_paths)}"))
+                self.job_queue.put(("load_progress", f"正在后台加载模型列表... {index + 1}/{len(model_paths)}"))
             except Exception as exc:
                 loaded_rows.append(f"{path.name} 读取失败: {exc}")
-                self.job_queue.put(("load_progress", f"正在后台加载模型列表... {index + 1}/{len(obj_paths)}"))
+                self.job_queue.put(("load_progress", f"正在后台加载模型列表... {index + 1}/{len(model_paths)}"))
 
         self.job_queue.put(
             (
                 "loaded_models",
                 {
                     "rows": loaded_rows,
-                    "status": f"已加载 {len(obj_paths)} 个模型。源目录只读，输出仅写入目标目录。",
+                    "status": f"已加载 {len(model_paths)} 个模型。源路径只读，输出仅写入目标目录。",
                 },
             )
         )
 
     def validate_common_inputs(self):
-        source_dir = Path(self.var_source_dir.get().strip())
+        source_path = Path(self.var_source_path.get().strip())
         output_dir = Path(self.var_output_dir.get().strip()) if self.var_output_dir.get().strip() else None
-        meshlab_path = Path(self.var_meshlab_path.get().strip()) if self.var_meshlab_path.get().strip() else None
+        blender_path = Path(self.var_blender_path.get().strip()) if self.var_blender_path.get().strip() else None
 
-        if not source_dir.exists():
-            raise ValueError("原始 OBJ 目录不存在")
+        if not source_path.exists():
+            raise ValueError("原始模型路径不存在")
         if output_dir is None:
             raise ValueError("请先设置输出目录")
+        if blender_path is None or not blender_path.exists():
+            raise ValueError("请先设置有效的 Blender 路径")
         output_dir.mkdir(parents=True, exist_ok=True)
-        return source_dir, output_dir, meshlab_path
+        return source_path, output_dir, blender_path
 
     def validate_drc_inputs(self):
         drc_input_dir = Path(self.var_drc_input_dir.get().strip()) if self.var_drc_input_dir.get().strip() else None
@@ -662,14 +852,35 @@ class MeshOptApp:
             raise ValueError("缺少 obj_to_drc.js 转换脚本")
         return drc_input_dir, drc_output_dir
 
-    def _target_faces_from_row(self, row: ModelRow):
-        params = row.current_params()
-        return max(0.0, params["ratio"])
+    def _validate_row_runtime(self, row: ModelRow, preview: bool = False):
+        self.validate_common_inputs()
+
+    def _process_row(self, row: ModelRow, output_dir: Path, blender_path: Path, preview: bool):
+        output_path = build_output_path(row.meta, output_dir, preview=preview)
+        return optimize_model(
+            row.meta.path,
+            output_path,
+            blender_path,
+            row.current_params(),
+        )
+
+    def _build_result_message(self, row: ModelRow, result: dict):
+        before = result.get("before", {})
+        after = result.get("after", {})
+        skipped = result.get("skipped_meshes", [])
+        msg = (
+            f"{row.meta.path.name}: mesh {before.get('mesh_count', 0)} -> {after.get('mesh_count', 0)} | "
+            f"triangles {before.get('triangle_count', 0)} -> {after.get('triangle_count', 0)}"
+        )
+        if skipped:
+            msg += f" | 跳过 {len(skipped)} 个 SkinnedMesh"
+        return msg
 
     def start_single_job(self, row: ModelRow, preview: bool):
         try:
             self.validate_common_inputs()
             row.current_params()
+            self._validate_row_runtime(row, preview=preview)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc))
             return
@@ -687,6 +898,7 @@ class MeshOptApp:
             self.validate_common_inputs()
             for row in selected_rows:
                 row.current_params()
+                self._validate_row_runtime(row, preview=False)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc))
             return
@@ -711,44 +923,34 @@ class MeshOptApp:
 
     def _run_single_job(self, row: ModelRow, preview: bool):
         try:
-            _, output_dir, meshlab_path = self.validate_common_inputs()
-            output_path = output_dir / row.meta.path.name
+            _, output_dir, blender_path = self.validate_common_inputs()
+            result = self._process_row(row, output_dir, blender_path, preview)
+            output_path = Path(result.get("output", build_output_path(row.meta, output_dir, preview=preview)))
+            msg = self._build_result_message(row, result)
             if preview:
-                output_path = output_dir / f"{row.meta.path.stem}_preview.obj"
-            result = simplify_obj(row.meta.path, output_path, row.current_params(), self._target_faces_from_row(row))
-            msg = (
-                f"{row.meta.path.name}: target={result['target_faces']} | "
-                f"{result['orig_faces']} -> {result['new_faces']} faces | "
-                f"{result['output_size_mb']:.2f} MB"
-            )
-            if preview:
-                if not meshlab_path or not meshlab_path.exists():
-                    raise ValueError("MeshLab 路径不存在，无法预览")
-                subprocess.Popen([str(meshlab_path), str(output_path)])
-                msg += " | 已调用 MeshLab 预览"
+                subprocess.Popen([str(blender_path), str(output_path)])
+                msg += " | 已调用 Blender 预览"
             self.job_queue.put(("single_done", (row, msg, result)))
         except Exception as exc:
             self.job_queue.put(("error", f"{row.meta.path.name}: {exc}"))
 
     def _run_batch_job(self, rows):
         try:
-            source_dir, output_dir, _ = self.validate_common_inputs()
+            source_path, output_dir, blender_path = self.validate_common_inputs()
             report = []
             for index, row in enumerate(rows, start=1):
-                result = simplify_obj(row.meta.path, output_dir / row.meta.path.name, row.current_params(), self._target_faces_from_row(row))
+                result = self._process_row(row, output_dir, blender_path, preview=False)
                 report.append(result)
                 self.job_queue.put((
                     "batch_item_done",
                     (
                         row,
-                        f"[{index}/{len(rows)}] {row.meta.path.name}: "
-                        f"target={result['target_faces']} | {result['orig_faces']} -> {result['new_faces']} faces | "
-                        f"{result['output_size_mb']:.2f} MB",
+                        f"[{index}/{len(rows)}] {self._build_result_message(row, result)}",
                         result,
                     ),
                 ))
             if self.var_generate_data_json.get():
-                write_output_data_json(source_dir, output_dir)
+                write_output_data_json(source_path, output_dir, rows)
             report_path = output_dir / "tool_simplify_report.json"
             report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
             self.job_queue.put(("info", f"批量完成，输出目录: {output_dir}"))
@@ -871,10 +1073,13 @@ class MeshOptApp:
         self.save_settings()
 
     def _update_row_result(self, row: ModelRow, result: dict):
+        before = result.get("before", {})
+        after = result.get("after", {})
+        skipped = len(result.get("skipped_meshes", []))
         row.result_text = (
-            f"target={result['target_faces']}, "
-            f"actual={result['new_faces']} faces, "
-            f"size={result['output_size_mb']:.2f} MB"
+            f"tri={before.get('triangle_count', 0)}->{after.get('triangle_count', 0)}, "
+            f"mesh={before.get('mesh_count', 0)}->{after.get('mesh_count', 0)}, "
+            f"skip={skipped}"
         )
         self._refresh_model_tree()
         if row is self.active_row:
@@ -882,11 +1087,11 @@ class MeshOptApp:
 
     def save_settings(self):
         payload = {
-            "source_dir": self.var_source_dir.get(),
+            "source_path": self.var_source_path.get(),
             "output_dir": self.var_output_dir.get(),
             "drc_input_dir": self.var_drc_input_dir.get(),
             "drc_output_dir": self.var_drc_output_dir.get(),
-            "meshlab_path": self.var_meshlab_path.get(),
+            "blender_path": self.var_blender_path.get(),
             "generate_data_json": self.var_generate_data_json.get(),
             "recent_profile_paths": self.recent_profile_paths,
         }
@@ -894,26 +1099,27 @@ class MeshOptApp:
 
     def _load_settings(self):
         if not SETTINGS_PATH.exists():
-            self.var_source_dir.set(str(Path.cwd().parent / "obj_out"))
+            self.var_source_path.set(str(Path.cwd().parent / "obj_out"))
             self.var_output_dir.set(str(Path.cwd().parent / "tool_output"))
             self.var_drc_input_dir.set(str(Path.cwd().parent / "tool_output"))
             self.var_drc_output_dir.set(str(Path.cwd().parent / "tool_output_drc"))
+            self.var_blender_path.set(DEFAULT_BLENDER)
             return
         try:
             payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-            self.var_source_dir.set(payload.get("source_dir", str(Path.cwd().parent / "obj_out")))
+            self.var_source_path.set(payload.get("source_path", payload.get("source_dir", str(Path.cwd().parent / "obj_out"))))
             self.var_output_dir.set(payload.get("output_dir", str(Path.cwd().parent / "tool_output")))
             self.var_drc_input_dir.set(payload.get("drc_input_dir", str(Path.cwd().parent / "tool_output")))
             self.var_drc_output_dir.set(payload.get("drc_output_dir", str(Path.cwd().parent / "tool_output_drc")))
-            self.var_meshlab_path.set(payload.get("meshlab_path", DEFAULT_MESHLAB))
+            self.var_blender_path.set(payload.get("blender_path", DEFAULT_BLENDER))
             self.var_generate_data_json.set(payload.get("generate_data_json", True))
             self.recent_profile_paths = payload.get("recent_profile_paths", [])
         except Exception:
-            self.var_source_dir.set(str(Path.cwd().parent / "obj_out"))
+            self.var_source_path.set(str(Path.cwd().parent / "obj_out"))
             self.var_output_dir.set(str(Path.cwd().parent / "tool_output"))
             self.var_drc_input_dir.set(str(Path.cwd().parent / "tool_output"))
             self.var_drc_output_dir.set(str(Path.cwd().parent / "tool_output_drc"))
-            self.var_meshlab_path.set(DEFAULT_MESHLAB)
+            self.var_blender_path.set(DEFAULT_BLENDER)
             self.recent_profile_paths = []
 
     def on_close(self):
@@ -943,48 +1149,9 @@ class MeshOptApp:
         data["result_urls"] = result_urls
         (drc_output_dir / "data.json").write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
-
-def simplify_obj(source_path: Path, output_path: Path, params: dict, target_ratio: float):
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    ms = ml.MeshSet()
-    ms.load_new_mesh(str(source_path))
-    mesh = ms.current_mesh()
-    original_faces = int(mesh.face_number())
-    original_vertices = int(mesh.vertex_number())
-    target_faces = max(1, int(original_faces * target_ratio))
-    ms.meshing_decimation_quadric_edge_collapse(
-        targetfacenum=target_faces,
-        targetperc=0.0,
-        qualitythr=float(params["qualitythr"]),
-        preserveboundary=bool(params["preserveboundary"]),
-        boundaryweight=1.0,
-        preservenormal=bool(params["preservenormal"]),
-        preservetopology=bool(params["preservetopology"]),
-        optimalplacement=True,
-        planarquadric=False,
-        planarweight=0.001,
-        qualityweight=False,
-        autoclean=True,
-        selected=False,
-    )
-    current = ms.current_mesh()
-    ms.save_current_mesh(str(output_path))
-    output_size = output_path.stat().st_size
-    return {
-        "file": source_path.name,
-        "output": str(output_path),
-        "target_faces": int(target_faces),
-        "orig_faces": original_faces,
-        "new_faces": int(current.face_number()),
-        "orig_vertices": original_vertices,
-        "new_vertices": int(current.vertex_number()),
-        "output_size": output_size,
-        "output_size_mb": output_size / 1024 / 1024,
-    }
-
-
-def write_output_data_json(source_dir: Path, output_dir: Path):
-    candidates = [source_dir / "data.json", source_dir.parent / "data.json"]
+def write_output_data_json(source_path: Path, output_dir: Path, rows):
+    source_root = source_root_for_metadata(source_path)
+    candidates = [source_root / "data.json", source_root.parent / "data.json"]
     source_json = next((path for path in candidates if path.exists()), None)
     if not source_json:
         return
@@ -993,16 +1160,22 @@ def write_output_data_json(source_dir: Path, output_dir: Path):
     if isinstance(data.get("patient"), dict):
         data["patient"]["name"] = output_dir.name
     result_urls = []
+    row_map = {row.meta.path.stem: row for row in rows}
     for item in data.get("result_urls", []):
-        obj_path = output_dir / f"{item['filename']}.obj"
-        if not obj_path.exists():
+        row = row_map.get(item["filename"])
+        if row is None:
             continue
+        output_path = build_output_path(row.meta, output_dir, preview=False)
+        if not output_path.exists():
+            continue
+        suffix = output_path.suffix.lower()
+        mime_type = "model/fbx" if suffix == FBX_SUFFIX else "model/obj"
         new_item = dict(item)
-        new_item["mime_type"] = "model/obj"
-        new_item["extension"] = "obj"
+        new_item["mime_type"] = mime_type
+        new_item["extension"] = suffix.lstrip(".")
         new_item["directory"] = output_dir.name
-        new_item["url"] = f"./{obj_path.name}"
-        new_item["size"] = obj_path.stat().st_size
+        new_item["url"] = f"./{output_path.name}"
+        new_item["size"] = output_path.stat().st_size
         result_urls.append(new_item)
     data["result_urls"] = result_urls
     (output_dir / "data.json").write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -1017,9 +1190,9 @@ def create_output_zip(output_dir: Path) -> Path:
         for path in sorted(output_dir.iterdir()):
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in {".obj", ".drc", ".json"}:
+            if path.suffix.lower() not in {".obj", ".fbx", ".drc", ".json"}:
                 continue
-            if path.name.endswith("_preview.obj"):
+            if path.name.endswith("_preview.obj") or path.name.endswith("_preview.fbx"):
                 continue
             zf.write(path, arcname=path.name)
     return zip_path
