@@ -10,10 +10,12 @@ def main():
     parser.add_argument("--source", required=True, action="append", help="Model file to test. Repeat for multiple files.")
     parser.add_argument("--blender", required=True, help="Path to blender executable.")
     parser.add_argument("--output-dir", default="", help="Optional output directory. Defaults to each FBX file's parent.")
-    parser.add_argument("--algorithm", choices=("COLLAPSE", "UNSUBDIV", "DISSOLVE"), default="COLLAPSE")
+    parser.add_argument("--algorithm", choices=("COLLAPSE", "UNSUBDIV", "DISSOLVE", "REMESH", "BOX_PROXY"), default="COLLAPSE")
     parser.add_argument("--ratio", type=float, default=0.1)
     parser.add_argument("--iterations", type=int, default=2)
     parser.add_argument("--angle-limit", type=float, default=5.0)
+    parser.add_argument("--voxel-size", type=float, default=0.05)
+    parser.add_argument("--min-size", type=float, default=0.0)
     parser.add_argument("--use-symmetry", action="store_true")
     parser.add_argument("--symmetry-axis", choices=("X", "Y", "Z"), default="X")
     parser.add_argument("--no-triangulate", action="store_true")
@@ -33,8 +35,12 @@ def main():
         )
     elif args.algorithm == "UNSUBDIV":
         params["iterations"] = args.iterations
-    else:
+    elif args.algorithm == "DISSOLVE":
         params["angle_limit"] = args.angle_limit
+    elif args.algorithm == "REMESH":
+        params["voxel_size"] = args.voxel_size
+    else:
+        params["min_size"] = args.min_size
 
     reports = []
     for raw_source in args.source:

@@ -30,7 +30,7 @@ def _run_blender_job(blender_path: Path, payload: dict):
             "--",
             str(config_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
         if result.returncode != 0:
             detail = (result.stderr or "").strip() or (result.stdout or "").strip()
             raise RuntimeError(f"Blender 处理失败: {detail}")

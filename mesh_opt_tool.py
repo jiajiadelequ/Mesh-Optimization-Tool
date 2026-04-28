@@ -26,6 +26,8 @@ ALGORITHM_LABEL_TO_CODE = {
     "通用减面（Collapse）": "COLLAPSE",
     "规整网格回退（Un-Subdivide）": "UNSUBDIV",
     "平面合并（Planar Dissolve）": "DISSOLVE",
+    "重建网格（Remesh）": "REMESH",
+    "代理盒（Box Proxy）": "BOX_PROXY",
 }
 ALGORITHM_CODE_TO_LABEL = {value: key for key, value in ALGORITHM_LABEL_TO_CODE.items()}
 
@@ -121,6 +123,22 @@ class ModelRow:
             return {
                 "algorithm": algorithm,
                 "angle_limit": angle_limit,
+            }
+        if algorithm == "REMESH":
+            voxel_size = float(raw_value)
+            if voxel_size <= 0:
+                raise ValueError("体素大小必须大于 0，例如 0.05 或 0.1")
+            return {
+                "algorithm": algorithm,
+                "voxel_size": voxel_size,
+            }
+        if algorithm == "BOX_PROXY":
+            min_size = float(raw_value)
+            if min_size < 0:
+                raise ValueError("忽略小零件尺寸不能小于 0，例如 0、0.01 或 0.05")
+            return {
+                "algorithm": algorithm,
+                "min_size": min_size,
             }
         raise ValueError("不支持的减面算法")
 
@@ -347,7 +365,7 @@ class MeshOptApp:
 
         self._attach_tooltip(
             [algorithm_label, algorithm_combo],
-            "这里可以选 Blender 的三种减面方式。Collapse 最通用，Un-Subdivide 适合规整网格，Dissolve 适合大片平面。",
+            "这里可以选 Blender 的几种常用简化方式。通用减面最稳，规整网格回退适合细分网格，平面合并适合大片平面，重建网格会重新生成网格，代理盒会把零件直接替换成一堆盒子。",
         )
         self.primary_tooltips = self._attach_tooltip([self.primary_label_widget, self.primary_entry_widget], "")
         self._attach_tooltip([self.symmetry_check], "如果模型本来左右或前后差不多，打开它后，Blender 会尽量按对称方式一起减面。人物、车、机械这类模型通常比较适合。")
@@ -396,6 +414,18 @@ class MeshOptApp:
         elif algorithm == "DISSOLVE":
             self.var_editor_primary_label.set("平面合并角度")
             self.primary_tooltip_text = "这个模式更适合建筑、机械、墙面这类比较平的模型。数字越大，越容易把差不多在一个平面上的小碎面合并掉。"
+            self.symmetry_check.state(["disabled"])
+            self.axis_combo.state(["disabled"])
+            self.triangulate_check.state(["disabled"])
+        elif algorithm == "REMESH":
+            self.var_editor_primary_label.set("体素大小")
+            self.primary_tooltip_text = "这个模式不是单纯减面，而是把模型重新捏成一张更规整的新网格。数值越小，细节保留越多；数值越大，模型会更粗、更轻。"
+            self.symmetry_check.state(["disabled"])
+            self.axis_combo.state(["disabled"])
+            self.triangulate_check.state(["disabled"])
+        elif algorithm == "BOX_PROXY":
+            self.var_editor_primary_label.set("忽略小零件尺寸")
+            self.primary_tooltip_text = "这个模式会按每个连通零件的包围盒直接生成盒子代理。这里填一个尺寸阈值后，太小的零件会直接跳过，避免生成太多碎盒子。像课桌这类模型，通常可以先试 0.02 到 0.05。"
             self.symmetry_check.state(["disabled"])
             self.axis_combo.state(["disabled"])
             self.triangulate_check.state(["disabled"])
@@ -577,6 +607,10 @@ class MeshOptApp:
             self.var_editor_algorithm_value.set("2")
         elif algorithm == "DISSOLVE" and self.var_editor_algorithm_value.get().strip() in {"", "0.10", "2"}:
             self.var_editor_algorithm_value.set("5")
+        elif algorithm == "REMESH" and self.var_editor_algorithm_value.get().strip() in {"", "0.10", "2", "5"}:
+            self.var_editor_algorithm_value.set("0.05")
+        elif algorithm == "BOX_PROXY" and self.var_editor_algorithm_value.get().strip() in {"", "0.10", "2", "5", "0.05"}:
+            self.var_editor_algorithm_value.set("0.02")
         elif algorithm == "COLLAPSE" and self.var_editor_algorithm_value.get().strip() in {"", "2", "5"}:
             self.var_editor_algorithm_value.set("0.10")
         self._update_algorithm_ui()
@@ -868,6 +902,14 @@ class MeshOptApp:
         before = result.get("before", {})
         after = result.get("after", {})
         skipped = result.get("skipped_meshes", [])
+        if result.get("proxy_box_count") is not None:
+            msg = (
+                f"{row.meta.path.name}: box {result.get('proxy_box_count', 0)} | "
+                f"triangles {before.get('triangle_count', 0)} -> {after.get('triangle_count', 0)}"
+            )
+            if skipped:
+                msg += f" | 跳过 {len(skipped)} 个零件"
+            return msg
         msg = (
             f"{row.meta.path.name}: mesh {before.get('mesh_count', 0)} -> {after.get('mesh_count', 0)} | "
             f"triangles {before.get('triangle_count', 0)} -> {after.get('triangle_count', 0)}"
@@ -1076,11 +1118,18 @@ class MeshOptApp:
         before = result.get("before", {})
         after = result.get("after", {})
         skipped = len(result.get("skipped_meshes", []))
-        row.result_text = (
-            f"tri={before.get('triangle_count', 0)}->{after.get('triangle_count', 0)}, "
-            f"mesh={before.get('mesh_count', 0)}->{after.get('mesh_count', 0)}, "
-            f"skip={skipped}"
-        )
+        if result.get("proxy_box_count") is not None:
+            row.result_text = (
+                f"box={result.get('proxy_box_count', 0)}, "
+                f"tri={before.get('triangle_count', 0)}->{after.get('triangle_count', 0)}, "
+                f"skip={skipped}"
+            )
+        else:
+            row.result_text = (
+                f"tri={before.get('triangle_count', 0)}->{after.get('triangle_count', 0)}, "
+                f"mesh={before.get('mesh_count', 0)}->{after.get('mesh_count', 0)}, "
+                f"skip={skipped}"
+            )
         self._refresh_model_tree()
         if row is self.active_row:
             self._load_editor_from_row(row)

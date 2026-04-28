@@ -4,6 +4,7 @@ import traceback
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix, Vector
 
 
 OBJ_SUFFIX = ".obj"
@@ -182,6 +183,189 @@ def apply_decimate(obj, params: dict):
     }
 
 
+def apply_remesh(obj, params: dict):
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    before_triangles = len(mesh.loop_triangles)
+    before_vertices = len(mesh.vertices)
+    voxel_size = max(0.0001, float(params.get("voxel_size", 0.05)))
+    modifier = obj.modifiers.new(name="MeshOptRemesh", type="REMESH")
+    modifier.mode = "VOXEL"
+    if hasattr(modifier, "voxel_size"):
+        modifier.voxel_size = voxel_size
+    if hasattr(modifier, "adaptivity"):
+        modifier.adaptivity = 0.0
+    if hasattr(modifier, "use_remove_disconnected"):
+        modifier.use_remove_disconnected = True
+    if hasattr(modifier, "use_smooth_shade"):
+        modifier.use_smooth_shade = False
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.modifier_apply(modifier=modifier.name)
+    obj.data.calc_loop_triangles()
+    return {
+        "algorithm": "REMESH",
+        "triangle_count_before": before_triangles,
+        "triangle_count_after": len(obj.data.loop_triangles),
+        "vertex_count_before": before_vertices,
+        "vertex_count_after": len(obj.data.vertices),
+        "material_slots": len(obj.data.materials),
+        "ratio": None,
+        "iterations": None,
+        "angle_limit": None,
+        "voxel_size": voxel_size,
+        "use_symmetry": False,
+        "symmetry_axis": None,
+        "triangulate": None,
+    }
+
+
+def create_box_proxy_from_bounds(source_obj, local_center: Vector, local_size: Vector, name: str):
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 0.0, 0.0))
+    proxy_obj = bpy.context.active_object
+    proxy_obj.name = name
+    half_extents = Vector(
+        (
+            max(local_size.x * 0.5, 0.0005),
+            max(local_size.y * 0.5, 0.0005),
+            max(local_size.z * 0.5, 0.0005),
+        )
+    )
+    proxy_obj.matrix_world = (
+        source_obj.matrix_world
+        @ Matrix.Translation(local_center)
+        @ Matrix.Diagonal((half_extents.x, half_extents.y, half_extents.z, 1.0))
+    )
+    return proxy_obj
+
+
+def iter_connected_component_bounds(source_obj):
+    mesh = source_obj.data
+    polygons = mesh.polygons
+    vertices = mesh.vertices
+    vert_to_polys = [set() for _ in range(len(vertices))]
+    coord_to_polys = {}
+    for poly_index, poly in enumerate(polygons):
+        for vertex_index in poly.vertices:
+            vert_to_polys[vertex_index].add(poly_index)
+            coord_key = tuple(round(value, 6) for value in vertices[vertex_index].co)
+            coord_to_polys.setdefault(coord_key, set()).add(poly_index)
+
+    remaining = set(range(len(polygons)))
+    while remaining:
+        start = remaining.pop()
+        stack = [start]
+        component_polys = {start}
+        component_verts = set(polygons[start].vertices)
+        while stack:
+            poly_index = stack.pop()
+            for vertex_index in polygons[poly_index].vertices:
+                neighbor_set = set(vert_to_polys[vertex_index])
+                coord_key = tuple(round(value, 6) for value in vertices[vertex_index].co)
+                neighbor_set.update(coord_to_polys.get(coord_key, set()))
+                for neighbor_poly_index in neighbor_set:
+                    if neighbor_poly_index in remaining:
+                        remaining.remove(neighbor_poly_index)
+                        component_polys.add(neighbor_poly_index)
+                        stack.append(neighbor_poly_index)
+                        component_verts.update(polygons[neighbor_poly_index].vertices)
+        points = [vertices[index].co.copy() for index in component_verts]
+        min_corner = Vector(
+            (
+                min(point.x for point in points),
+                min(point.y for point in points),
+                min(point.z for point in points),
+            )
+        )
+        max_corner = Vector(
+            (
+                max(point.x for point in points),
+                max(point.y for point in points),
+                max(point.z for point in points),
+            )
+        )
+        local_size = max_corner - min_corner
+        yield {
+            "poly_count": len(component_polys),
+            "vert_count": len(component_verts),
+            "min_corner": min_corner,
+            "max_corner": max_corner,
+            "local_center": (min_corner + max_corner) * 0.5,
+            "local_size": local_size,
+            "max_dim": max(local_size.x, local_size.y, local_size.z),
+        }
+
+
+def join_objects(objects, name: str):
+    if not objects:
+        return None
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objects[0]
+    bpy.ops.object.join()
+    merged = bpy.context.view_layer.objects.active
+    merged.name = name
+    if merged.data:
+        merged.data.name = f"{name}_mesh"
+    return merged
+
+
+def build_box_proxy_scene(params: dict):
+    min_size = max(0.0, float(params.get("min_size", 0.0)))
+    source_mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+    processed = []
+    skipped = []
+    proxies = []
+
+    for obj in source_mesh_objects:
+        if is_skinned_object(obj):
+            skipped.append({"object": obj.name, "reason": "skinned_mesh"})
+            continue
+        obj.data.calc_loop_triangles()
+        component_index = 0
+        for component in iter_connected_component_bounds(obj):
+            component_index += 1
+            if component["max_dim"] < min_size:
+                skipped.append({"object": f"{obj.name}#{component_index}", "reason": "below_min_size"})
+                continue
+            proxy_obj = create_box_proxy_from_bounds(
+                obj,
+                component["local_center"],
+                component["local_size"],
+                f"{obj.name}_box_{component_index}",
+            )
+            proxies.append(proxy_obj)
+            processed.append(
+                {
+                    "object": f"{obj.name}#{component_index}",
+                    "triangle_count_before": component["poly_count"],
+                    "vertex_count_before": component["vert_count"],
+                    "algorithm": "BOX_PROXY",
+                    "triangle_count_after": 12,
+                    "vertex_count_after": 8,
+                    "min_size": min_size,
+                    "max_dim": round(component["max_dim"], 5),
+                }
+            )
+
+    for obj in source_mesh_objects:
+        if obj.name in bpy.data.objects:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    merged_proxy = join_objects(proxies, "BoxProxy")
+    if merged_proxy is None:
+        raise ValueError("没有生成任何 Box Proxy，请检查模型是否全被过滤掉了")
+
+    merged_proxy.data.calc_loop_triangles()
+    return {
+        "processed_meshes": processed,
+        "skipped_meshes": skipped,
+        "proxy_box_count": len(proxies),
+        "proxy_triangle_count": len(merged_proxy.data.loop_triangles),
+        "proxy_vertex_count": len(merged_proxy.data.vertices),
+    }
+
+
 def optimize_scene(config: dict):
     source_path = Path(config["source_path"])
     output_path = Path(config["output_path"])
@@ -192,17 +376,32 @@ def optimize_scene(config: dict):
     before_stats = collect_scene_stats()
 
     bpy.ops.object.select_all(action="DESELECT")
+    algorithm = str(params.get("algorithm", "COLLAPSE")).upper()
     processed = []
     skipped = []
-    mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
-    for obj in mesh_objects:
-        if is_skinned_object(obj):
-            skipped.append({"object": obj.name, "reason": "skinned_mesh"})
-            continue
-        if obj.data.users > 1:
-            obj.data = obj.data.copy()
-        stats = apply_decimate(obj, params)
-        processed.append({"object": obj.name, **stats})
+    extra_result = {}
+    if algorithm == "BOX_PROXY":
+        proxy_result = build_box_proxy_scene(params)
+        processed = proxy_result["processed_meshes"]
+        skipped = proxy_result["skipped_meshes"]
+        extra_result = {
+            "proxy_box_count": proxy_result["proxy_box_count"],
+            "proxy_triangle_count": proxy_result["proxy_triangle_count"],
+            "proxy_vertex_count": proxy_result["proxy_vertex_count"],
+        }
+    else:
+        mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+        for obj in mesh_objects:
+            if is_skinned_object(obj):
+                skipped.append({"object": obj.name, "reason": "skinned_mesh"})
+                continue
+            if obj.data.users > 1:
+                obj.data = obj.data.copy()
+            if algorithm == "REMESH":
+                stats = apply_remesh(obj, params)
+            else:
+                stats = apply_decimate(obj, params)
+            processed.append({"object": obj.name, **stats})
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_model(output_path)
@@ -216,6 +415,7 @@ def optimize_scene(config: dict):
         "after": after_stats,
         "processed_meshes": processed,
         "skipped_meshes": skipped,
+        **extra_result,
     }
 
 

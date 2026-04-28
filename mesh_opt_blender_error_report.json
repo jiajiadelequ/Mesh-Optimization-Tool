@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "error": "没有生成任何 Box Proxy，请检查模型是否全被过滤掉了",
+  "traceback": "Traceback (most recent call last):\n  File \"F:\\mesh_opt_tool\\blender_fbx_optimize.py\", line 398, in main\n    payload = optimize_scene(config)\n  File \"F:\\mesh_opt_tool\\blender_fbx_optimize.py\", line 341, in optimize_scene\n    proxy_result = build_box_proxy_scene(params)\n  File \"F:\\mesh_opt_tool\\blender_fbx_optimize.py\", line 314, in build_box_proxy_scene\n    raise ValueError(\"没有生成任何 Box Proxy，请检查模型是否全被过滤掉了\")\nValueError: 没有生成任何 Box Proxy，请检查模型是否全被过滤掉了\n"
+}
